@@ -439,7 +439,7 @@ private:
 
 typedef struct {
     uint32_t uid;
-    const uint8_t* keyName;
+    const uint8_t* filename;
 
     struct listnode plist;
 } grant_t;
@@ -622,20 +622,18 @@ public:
         if (grant == NULL) {
             grant = new grant_t;
             grant->uid = uid;
-            grant->keyName = reinterpret_cast<const uint8_t*>(strdup(filename));
+            grant->filename = reinterpret_cast<const uint8_t*>(strdup(filename));
             list_add_tail(&mGrants, &grant->plist);
         }
     }
 
-    bool removeGrant(const Value* keyValue, const Value* uidValue) {
+    bool removeGrant(const char* filename, const Value* uidValue) {
         uid_t uid;
         if (!convertToUid(uidValue, &uid)) {
             return false;
         }
 
-        ValueString keyString(keyValue);
-
-        grant_t *grant = getGrant(keyString.c_str(), uid);
+        grant_t *grant = getGrant(filename, uid);
         if (grant != NULL) {
             list_remove(&grant->plist);
             delete grant;
@@ -645,9 +643,8 @@ public:
         return false;
     }
 
-    bool hasGrant(const Value* keyValue, const uid_t uid) const {
-        ValueString keyString(keyValue);
-        return getGrant(keyString.c_str(), uid) != NULL;
+    bool hasGrant(const char* filename, const uid_t uid) const {
+        return getGrant(filename, uid) != NULL;
     }
 
     ResponseCode importKey(const Value* key, const char* filename) {
@@ -748,15 +745,15 @@ private:
                 && (strcmp(filename, "..") != 0));
     }
 
-    grant_t* getGrant(const char* keyName, uid_t uid) const {
+    grant_t* getGrant(const char* filename, uid_t uid) const {
         struct listnode *node;
         grant_t *grant;
 
         list_for_each(node, &mGrants) {
             grant = node_to_item(node, grant_t, plist);
             if (grant->uid == uid
-                    && !strcmp(reinterpret_cast<const char*>(grant->keyName),
-                               keyName)) {
+                    && !strcmp(reinterpret_cast<const char*>(grant->filename),
+                               filename)) {
                 return grant;
             }
         }
@@ -916,12 +913,12 @@ static ResponseCode get_key_for_name(KeyStore* keyStore, Blob* keyBlob, const Va
     }
 
     // They might be using a granted key.
-    if (!keyStore->hasGrant(keyName, uid)) {
+    encode_key(filename, keyName);
+    if (!keyStore->hasGrant(filename, uid)) {
         return responseCode;
     }
 
     // It is a granted key. Try to load it.
-    encode_key(filename, keyName);
     return keyStore->get(filename, keyBlob, type);
 }
 
@@ -1159,19 +1156,25 @@ static ResponseCode del_key(KeyStore* keyStore, int, uid_t uid, Value* keyName, 
         return responseCode;
     }
 
+    ResponseCode rc = NO_ERROR;
+
     const keymaster_device_t* device = keyStore->getDevice();
     if (device == NULL) {
-        return SYSTEM_ERROR;
+        rc = SYSTEM_ERROR;
+    } else {
+        // A device doesn't have to implement delete_keypair.
+        if (device->delete_keypair != NULL) {
+            if (device->delete_keypair(device, keyBlob.getValue(), keyBlob.getLength())) {
+                rc = SYSTEM_ERROR;
+            }
+        }
     }
 
-    if (device->delete_keypair == NULL) {
-        ALOGE("device has no delete_keypair implementation!");
-        return SYSTEM_ERROR;
+    if (rc != NO_ERROR) {
+        return rc;
     }
 
-    int rc = device->delete_keypair(device, keyBlob.getValue(), keyBlob.getLength());
-
-    return rc ? SYSTEM_ERROR : NO_ERROR;
+    return (unlink(filename) && errno != ENOENT) ? SYSTEM_ERROR : NO_ERROR;
 }
 
 static ResponseCode sign(KeyStore* keyStore, int sock, uid_t uid, Value* keyName, Value* data,
@@ -1267,7 +1270,40 @@ static ResponseCode ungrant(KeyStore* keyStore, int, uid_t uid, Value* keyName,
         return (errno != ENOENT) ? SYSTEM_ERROR : KEY_NOT_FOUND;
     }
 
-    return keyStore->removeGrant(keyName, granteeData) ? NO_ERROR : KEY_NOT_FOUND;
+    return keyStore->removeGrant(filename, granteeData) ? NO_ERROR : KEY_NOT_FOUND;
+}
+
+static ResponseCode getmtime(KeyStore*, int sock, uid_t uid, Value* keyName,
+        Value*, Value*) {
+    char filename[NAME_MAX];
+    encode_key_for_uid(filename, uid, keyName);
+    if (access(filename, R_OK) == -1) {
+        return (errno != ENOENT) ? SYSTEM_ERROR : KEY_NOT_FOUND;
+    }
+
+    int fd = open(filename, O_NOFOLLOW, O_RDONLY);
+    if (fd < 0) {
+        return SYSTEM_ERROR;
+    }
+
+    struct stat s;
+    int ret = fstat(fd, &s);
+    close(fd);
+    if (ret == -1) {
+        return SYSTEM_ERROR;
+    }
+
+    uint8_t *data;
+    int dataLength = asprintf(reinterpret_cast<char**>(&data), "%lu", s.st_mtime);
+    if (dataLength < 0) {
+        return SYSTEM_ERROR;
+    }
+
+    send_code(sock, NO_ERROR);
+    send_message(sock, data, dataLength);
+    free(data);
+
+    return NO_ERROR_RESPONSE_CODE_SENT;
 }
 
 /* Here are the permissions, actions, users, and the main function. */
@@ -1319,6 +1355,7 @@ static struct action {
     {del_key,    CommandCodes[DEL_KEY],    STATE_ANY,      P_DELETE,   {KEY_SIZE, 0, 0}},
     {grant,      CommandCodes[GRANT],      STATE_NO_ERROR, P_GRANT,    {KEY_SIZE, KEY_SIZE, 0}},
     {ungrant,    CommandCodes[UNGRANT],    STATE_NO_ERROR, P_GRANT,    {KEY_SIZE, KEY_SIZE, 0}},
+    {getmtime,   CommandCodes[GETMTIME],   STATE_ANY,      P_SAW,      {KEY_SIZE, 0, 0}},
     {NULL,       0,                        STATE_ANY,      0,          {0, 0, 0}},
 };
 
