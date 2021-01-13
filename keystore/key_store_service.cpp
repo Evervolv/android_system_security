@@ -49,6 +49,7 @@
 #include <keystore/keystore_return_types.h>
 
 #include <hardware/hw_auth_token.h>
+#include <hardware/keymaster_defs.h>
 
 namespace keystore {
 
@@ -120,6 +121,8 @@ KeyStoreServiceReturnCode updateParamsForAttestation(uid_t callingUid, Authoriza
 
     auto asn1_attestation_id_result = security::gather_attestation_application_id(callingUid);
     if (!asn1_attestation_id_result.isOk()) {
+        if (asn1_attestation_id_result.status() == KM_ERROR_UNIMPLEMENTED)
+            return KeyStoreServiceReturnCode(KM_ERROR_UNIMPLEMENTED);
         ALOGE("failed to gather attestation_id");
         // Couldn't get attestation ID; just use an empty one rather than failing.
         asn1_attestation_id_result = std::vector<uint8_t>();
