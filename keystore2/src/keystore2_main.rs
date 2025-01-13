@@ -93,6 +93,7 @@ fn main() {
 
     ENFORCEMENTS.install_confirmation_token_receiver(confirmation_token_receiver);
 
+    std::thread::spawn(keystore2::globals::await_boot_completed);
     entropy::register_feeder();
     shared_secret_negotiation::perform_shared_secret_negotiation();
 
